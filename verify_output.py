@@ -27,11 +27,16 @@ expected = {'no_probe': 0, 'sparse_probe': 40, 'full_probe': 160}[cond]
 check('scheduled probes == %d' % expected, sched.sum() == expected, str(sched.sum()))
 if cond == 'sparse_probe':
     check('10 scheduled per block', (main.groupby('blockIndex')['probeOriginallyScheduled'].sum() == 10).all())
-conf = main['confidence_resp.keys']
+for col_ in ('confidenceRating', 'confidenceRT'):  # absent when no rating was ever shown (no_probe)
+    if col_ not in main:
+        main = main.assign(**{col_: float('nan')})
+conf = main['confidenceRating']
 delivered = main['probeScheduled'] == 1
 check('confidence only on delivered probe rows', conf[~delivered].isna().all())
+check('every delivered probe has a rating', conf[delivered].notna().all())
 check('no probe after a missed choice', (main.loc[main['choiceMade'] == 0, 'probeScheduled'] == 0).all())
 check('confidence values in 1..6', conf.dropna().astype(int).between(1, 6).all())
+check('confidence RT recorded on probes', main.loc[delivered, 'confidenceRT'].notna().all())
 check('calibratedTiltDeg present', df['calibratedTiltDeg'].notna().any(),
       str(df['calibratedTiltDeg'].dropna().iloc[0]) if df['calibratedTiltDeg'].notna().any() else '')
 check('tiltDegUsed constant in main', main['tiltDegUsed'].nunique() == 1)

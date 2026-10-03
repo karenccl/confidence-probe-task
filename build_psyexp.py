@@ -17,6 +17,7 @@ from psychopy.experiment.components.grating import GratingComponent
 from psychopy.experiment.components.slider import SliderComponent
 from psychopy.experiment.components.textbox import TextboxComponent
 from psychopy.experiment.components.button import ButtonComponent
+from psychopy.experiment.components.polygon import PolygonComponent
 from psychopy.experiment.routines.counterbalance import CounterbalanceRoutine
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,12 +117,12 @@ def add_fix(r, name, start=0, dur=0.5):
     return add_text(r, name, '+', start=start, dur=dur, height=0.05)
 
 
-def add_gabor(r, name, ori, dur=0.15):
+def add_gabor(r, name, ori, dur=0.15, start=0):
     g = GratingComponent(exp, r.name, name=name)
     setp(g, tex='sin', mask='gauss', size='(0.18, 0.18)', sf=4, contrast=0.8,
          ori=ori, pos='(0, 0)', units='from exp settings')
     every_repeat(g, 'ori')
-    g.params['startVal'].val = 0
+    g.params['startVal'].val = start
     g.params['stopType'].val = 'duration (s)'  # exactly 150 ms from actual onset
     g.params['stopVal'].val = dur
     r.addComponent(g)
@@ -135,30 +136,75 @@ def space_screen(name, text, repeat=False, dur=None):
     return r
 
 
-# Frame code: end the routine after a response, but never before 150 ms of exposure.
-def frame_py(resp):
-    return "if %s.keys and t >= 0.15:\n    continueRoutine = False" % resp
+PRE = 1.0  # leading cross inside the decision routine: 0.5 s ITI + 0.5 s fixation (fewer routine switches)
 
 
-def frame_js(resp):
-    return ("if (%s.keys !== undefined && %s.keys !== null && %s.keys.length > 0 "
-            "&& t >= 0.15) {\n    continueRoutine = false;\n}" % (resp, resp, resp))
+def timing_code(resp, mode):
+    """Decision-end logic. decisionEnd = routine time at the first response made after the 150 ms
+    minimum exposure, or at the end of the 1.5 s window if no response.
+    mode 'none': routine ends at decisionEnd.
+    mode 'tail': the cross stays for a further 1.5 s (post-decision period), then the routine ends.
+    mode 'probe': like 'tail' unless a confidence probe will follow (probe trial with a choice), then ends at decisionEnd."""
+    py_probe = {'none': 'True', 'tail': 'False',
+                'probe': '(probeThisTrial == 1 and bool(%s.keys))' % resp}[mode]
+    js_probe = {'none': 'true', 'tail': 'false',
+                'probe': ('(probeThisTrial === 1 && %s.keys !== undefined && %s.keys !== null '
+                          '&& %s.keys.length > 0)' % (resp, resp, resp))}[mode]
+    py_frame = (
+        "if decisionEnd < 0:\n"
+        "    if %(r)s.keys and t >= %(P)s + 0.15:\n"
+        "        decisionEnd = t\n"
+        "    elif t >= %(P)s + 1.5:\n"
+        "        decisionEnd = t\n"
+        "if decisionEnd >= 0:\n"
+        "    if %(pp)s:\n"
+        "        continueRoutine = False\n"
+        "    elif t >= decisionEnd + 1.5:\n"
+        "        continueRoutine = False" % dict(r=resp, P=PRE, pp=py_probe))
+    js_frame = (
+        "if (decisionEnd < 0) {\n"
+        "    if (%(r)s.keys !== undefined && %(r)s.keys !== null && %(r)s.keys.length > 0 "
+        "&& t >= %(P)s + 0.15) {\n"
+        "        decisionEnd = t;\n"
+        "    } else if (t >= %(P)s + 1.5) {\n"
+        "        decisionEnd = t;\n"
+        "    }\n"
+        "}\n"
+        "if (decisionEnd >= 0) {\n"
+        "    if (%(pp)s) {\n"
+        "        continueRoutine = false;\n"
+        "    } else if (t >= decisionEnd + 1.5) {\n"
+        "        continueRoutine = false;\n"
+        "    }\n"
+        "}" % dict(r=resp, P=PRE, pp=js_probe))
+    return dict(py_begin="decisionEnd = -1", js_begin="decisionEnd = -1;",
+                py_frame=py_frame, js_frame=js_frame)
 
 
-def decision_routine(prefix, ori, setup=None, end=None, correct='$corrAns'):
+def decision_routine(prefix, ori, setup=None, end=None, correct='$corrAns', mode='none'):
+    """One routine per trial: cross 0-PRE, grating 150 ms, cross until the end (see timing_code)."""
     r = new_routine(prefix + '_decision')
     if setup:
         add_code(r, prefix + '_setup', **setup)
-    add_gabor(r, prefix + '_gabor', ori)
-    wf = add_fix(r, prefix + '_wait_fix', start=0.15, dur=1.5)
+    add_fix(r, prefix + '_pre_fix', start=0, dur=PRE)
+    # grating and keyboard start on the same frame the leading cross finishes (no overlap, no gap)
+    g = add_gabor(r, prefix + '_gabor', ori, start=PRE)
+    g.params['startType'].val = 'condition'
+    g.params['startVal'].val = prefix + '_pre_fix.status == FINISHED'
+    wf = add_fix(r, prefix + '_wait_fix', start=PRE + 0.15, dur=1.5)
     # cross appears on the same frame the grating is removed (no gap, no overlap)
     wf.params['startType'].val = 'condition'
     wf.params['startVal'].val = prefix + '_gabor.status == FINISHED'
-    wf.params['stopType'].val = 'time (s)'
-    wf.params['stopVal'].val = 1.5
+    if mode == 'none':
+        wf.params['stopType'].val = 'time (s)'
+        wf.params['stopVal'].val = PRE + 1.5
+    else:  # stays on until the routine ends (post-decision period)
+        wf.params['stopType'].val = 'duration (s)'
+        wf.params['stopVal'].val = ''
     resp = prefix + '_resp'
-    add_keys(r, resp, "['f', 'j']", start=0, dur=1.5, force_end=False, correct=correct)
-    add_code(r, prefix + '_minexposure', py_frame=frame_py(resp), js_frame=frame_js(resp))
+    add_keys(r, resp, "['f', 'j']", start=PRE, dur=1.5, force_end=False, correct=correct,
+             cond=prefix + '_pre_fix.status == FINISHED')
+    add_code(r, prefix + '_minexposure', **timing_code(resp, mode))
     if end:
         add_code(r, prefix + '_end', **end)
     return r
@@ -268,10 +314,18 @@ var confidenceMade = 0;
 var showConfInstr = 0;
 var showNeutralInstr = 1;
 var feedbackText = "";
-var feedbackColor = "#ffdc00";
+var feedbackColor = "white";
 var blockText = "";
 var breakText = "";
 var FINISHED = PsychoJS.Status.FINISHED;  // used in the conditional start of *_wait_fix
+var decisionEnd = -1;
+var confRating = 0;
+var confMoved = 0;
+var confNKeysSeen = 0;
+var confFirstT = '';
+var confSubmitT = '';
+var markerX = 0;
+var markerOpacity = 0;
 var calibTiltSign = 1;
 var calibCorrAns = "j";
 
@@ -360,10 +414,11 @@ add_code(r, 'init_code', py_before=PY_BEFORE, py_begin_exp=PY_BEGIN_EXP, py_begi
 # Condition-specific instructions via 0/1-rep loops
 space_screen('confidence_instructions',
              'On some trials, you will also be asked how confident you are that your '
-             'choice was correct.\n\nUse keys 1-6:\n1 means you were guessing.\n6 means you '
-             'were very certain.\n\nUse the entire scale when appropriate. Confidence is '
-             'about the choice you just made, not your general ability.\n\n'
-             'Press SPACE to continue.')
+             'choice was correct.\n\nA scale from 1 to 6 will appear:\n1 means you were guessing, '
+             '6 means you were very certain.\n\nPress F to move the marker left and J to move it '
+             'right, then press SPACE to confirm. There is no time limit for the rating.\n\n'
+             'Use the entire scale when appropriate. Confidence is about the choice you just '
+             'made, not your general ability.\n\nPress SPACE to continue.')
 wrap_loop(TrialHandler(exp, name='confidenceInstructionLoop', loopType='sequential',
                        nReps='showConfInstr', isTrials=False),
           'confidence_instructions', 'confidence_instructions')
@@ -378,7 +433,6 @@ wrap_loop(TrialHandler(exp, name='neutralInstructionLoop', loopType='sequential'
 space_screen('practice_intro',
              'Practice: the patch is clearly tilted and you will get feedback.\n\n'
              'Press SPACE to start.')
-fix_routine('practice_fixation')
 decision_routine('practice', 'tiltSign * 12',
                  end=dict(py_end="thisExp.addData('phase', 'practice')\n"
                                  "",
@@ -388,8 +442,8 @@ r = new_routine('practice_feedback')
 add_code(r, 'practice_feedback_code',
          py_begin="""
 if not practice_resp.keys:
-    feedbackText = 'Too slow'
-    feedbackColor = '#ffdc00'
+    feedbackText = ''  # no response: no feedback message
+    feedbackColor = 'white'
 elif practice_resp.corr == 1:
     feedbackText = 'Correct'
     feedbackColor = '#2ecc40'
@@ -399,8 +453,8 @@ else:
 """,
          js_begin="""
 if (practice_resp.keys === undefined || practice_resp.keys === null || practice_resp.keys.length === 0) {
-    feedbackText = 'Too slow';
-    feedbackColor = '#ffdc00';
+    feedbackText = '';  // no response: no feedback message
+    feedbackColor = 'white';
 } else if (practice_resp.corr === 1) {
     feedbackText = 'Correct';
     feedbackColor = '#2ecc40';
@@ -412,14 +466,12 @@ if (practice_resp.keys === undefined || practice_resp.keys === null || practice_
 ft = add_text(r, 'practice_feedback_text', '$feedbackText', dur=0.6, height=0.06, repeat=True)
 setp(ft, color='$feedbackColor')
 every_repeat(ft, 'color')
-fix_routine('practice_iti')
-wrap_loop(two_cond_loop('practiceTrials', 6), 'practice_fixation', 'practice_iti')
+wrap_loop(two_cond_loop('practiceTrials', 6), 'practice_decision', 'practice_feedback')
 
 # -------------------------------------------------------------- calibration
 space_screen('calibration_intro',
              'Calibration: the patch will get harder to see. No feedback now. Keep '
              'responding as accurately as you can.\n\nPress SPACE to start.')
-fix_routine('calibration_fixation')
 # Distinct names: conditions-file variables (tiltSign, corrAns) are injected into globals by
 # the loop machinery, and assigning them in run() would shadow them as locals.
 SIGN_PY = """
@@ -455,12 +507,10 @@ decision_routine(
     'calibration', 'calibTiltSign * level', correct='$calibCorrAns',
     setup=dict(py_begin=SIGN_PY, js_begin=SIGN_JS),
     end=dict(py_end=CALIB_END_PY, js_end=CALIB_END_JS))
-r = new_routine('calibration_iti')
-add_fix(r, 'calibration_iti_fix', dur=0.5)
 wrap_loop(MultiStairHandler(exp, name='calibrationTrials', nReps=40, stairType='QUEST',
                             switchStairs='sequential', conditionsFile=QUEST,
                             conditions=[], isTrials=True),
-          'calibration_fixation', 'calibration_iti')
+          'calibration_decision', 'calibration_decision')
 r = new_routine('calibration_summary', duration=0.5)
 add_code(r, 'calibration_summary_code',
          py_begin="lastLevels = questLevels[-10:]\ntiltDeg = median_value(lastLevels)\n"
@@ -477,12 +527,8 @@ add_text(r, 'calibration_done_text', 'Calibration complete', dur=0.5, height=0.0
 # ----------------------------------------------------------------- baseline
 space_screen('baseline_intro',
              'Next part. No confidence reports in this part.\n\nPress SPACE to start.')
-fix_routine('baseline_fixation')
-decision_routine('baseline', 'tiltSign * tiltDeg', end=phase_end('baseline'))
-r = new_routine('baseline_post', duration=1.5)
-add_fix(r, 'baseline_post_fix', dur=1.5)
-fix_routine('baseline_iti')
-wrap_loop(two_cond_loop('baselineTrials', 20), 'baseline_fixation', 'baseline_iti')
+decision_routine('baseline', 'tiltSign * tiltDeg', end=phase_end('baseline'), mode='tail')
+wrap_loop(two_cond_loop('baselineTrials', 20), 'baseline_decision', 'baseline_decision')
 
 # --------------------------------------------------------------------- main
 space_screen('main_intro', 'Main task. Remember: F = left tilt, J = right tilt.\n\n'
@@ -496,7 +542,6 @@ add_code(r, 'block_intro_code',
 add_text(r, 'block_intro_text', '$blockText', repeat=True)
 add_keys(r, 'block_intro_key', "['space']", force_end=True)
 
-fix_routine('main_fixation')
 MAIN_SETUP_PY = ("trialIndex = globalTrialN\n\nif probeCondition == 'full_probe':\n    probeThisTrial = 1\n"
                  "elif probeCondition == 'sparse_probe':\n    probeThisTrial = int(probeSchedule[trialIndex])\n"
                  "else:\n    probeThisTrial = 0")
@@ -518,6 +563,8 @@ thisExp.addData('tiltSignUsed', tiltSign)
 thisExp.addData('probeOriginallyScheduled', probeOriginallyScheduled)
 thisExp.addData('probeScheduled', probeThisTrial)
 thisExp.addData('choiceMade', choiceMade)
+thisExp.addData('confidenceRequested', probeThisTrial)
+thisExp.addData('confidenceMade', 0)
 
 globalTrialN += 1
 '''
@@ -541,39 +588,125 @@ psychoJS.experiment.addData('tiltSignUsed', tiltSign);
 psychoJS.experiment.addData('probeOriginallyScheduled', probeOriginallyScheduled);
 psychoJS.experiment.addData('probeScheduled', probeThisTrial);
 psychoJS.experiment.addData('choiceMade', choiceMade);
+psychoJS.experiment.addData('confidenceRequested', probeThisTrial);
+psychoJS.experiment.addData('confidenceMade', 0);
 
 globalTrialN += 1;
 '''
 decision_routine('main', 'tiltSign * tiltDeg',
                  setup=dict(py_begin=MAIN_SETUP_PY, js_begin=MAIN_SETUP_JS),
-                 end=dict(py_end=MAIN_END_PY, js_end=MAIN_END_JS))
+                 end=dict(py_end=MAIN_END_PY, js_end=MAIN_END_JS), mode='probe')
 
-# Fixed 1.5 s post-decision period; routine-level duration is required because the
-# conditional confidence components may never start on non-probe trials.
-r = new_routine('main_post', duration=1.5)
-pf = add_fix(r, 'post_fix', dur=1.5)
-pf.params['startType'].val = 'condition'
-pf.params['startVal'].val = 'probeThisTrial == 0'
-cp = add_text(r, 'confidence_prompt',
-              'How confident are you that your choice was correct?\n\n'
-              '1       2       3       4       5       6\n'
-              'Guessing                                  Certain',
-              dur=1.5, height=0.04, pos='(0, 0)')
-cp.params['startType'].val = 'condition'
-cp.params['startVal'].val = 'probeThisTrial == 1'
-add_keys(r, 'confidence_resp', "['1', '2', '3', '4', '5', '6']", dur=1.5,
-         force_end=False, cond='probeThisTrial == 1')
-add_code(r, 'post_end',
-         py_end="confidenceMade = int(probeThisTrial == 1 and bool(confidence_resp.keys))\n"
-                "thisExp.addData('confidenceRequested', probeThisTrial)\n"
-                "thisExp.addData('confidenceMade', confidenceMade)",
-         js_end="confidenceMade = (\n    probeThisTrial === 1 &&\n"
-                "    confidence_resp.keys !== undefined &&\n    confidence_resp.keys !== null &&\n"
-                "    confidence_resp.keys.length > 0\n) ? 1 : 0;\n"
-                "psychoJS.experiment.addData('confidenceRequested', probeThisTrial);\n"
-                "psychoJS.experiment.addData('confidenceMade', confidenceMade);")
-fix_routine('main_iti')
-wrap_loop(two_cond_loop('mainTrials', 20), 'main_fixation', 'main_iti')
+# Post-decision period.
+#  * probe trial: self-paced confidence rating (F/J move a marker along 1-6, SPACE confirms, no time limit)
+#  * non-probe trial: fixation cross for 1.5 s
+# Two routines, each wrapped in a 0/1-rep loop driven by probeThisTrial.
+r = new_routine('main_post_probe')
+add_text(r, 'confidence_prompt', 'How confident are you that your choice was correct?',
+         height=0.04, pos='(0, 0.22)')
+for i in range(1, 7):
+    add_text(r, 'conf_n%d' % i, str(i), height=0.06, pos='(%.2f, 0.02)' % ((i - 3.5) * 0.12))
+add_text(r, 'conf_lab_lo', 'Guessing', height=0.03, pos='(%.2f, -0.07)' % (-2.5 * 0.12), wrap=0.3)
+add_text(r, 'conf_lab_hi', 'Certain', height=0.03, pos='(%.2f, -0.07)' % (2.5 * 0.12), wrap=0.3)
+add_text(r, 'conf_hint', 'F = move left     J = move right     SPACE = confirm',
+         height=0.028, pos='(0, -0.22)')
+mk = PolygonComponent(exp, r.name, name='conf_marker')
+setp(mk, shape='triangle', size='(0.04, 0.04)', pos='(markerX, 0.09)', ori=180,
+     opacity='markerOpacity', units='from exp settings')
+mk.params['fillColor'].val = 'white'
+mk.params['lineColor'].val = 'white'
+mk.params['startVal'].val = 0
+mk.params['stopType'].val = 'duration (s)'
+mk.params['stopVal'].val = ''
+every_frame = lambda c, *names: [setattr(c.params[n], 'updates', 'set every frame') for n in names]
+every_frame(mk, 'pos', 'opacity')
+r.addComponent(mk)
+k = add_keys(r, 'confidence_resp', "['f', 'j', 'space']", force_end=False)
+k.params['store'].val = 'all keys'
+add_code(r, 'confidence_logic',
+         py_begin="""
+confRating = 0
+confMoved = 0
+confNKeysSeen = 0
+confFirstT = ''
+confSubmitT = ''
+markerX = 0
+markerOpacity = 0
+""",
+         js_begin="""
+confRating = 0;
+confMoved = 0;
+confNKeysSeen = 0;
+confFirstT = '';
+confSubmitT = '';
+markerX = 0;
+markerOpacity = 0;
+""",
+         py_frame="""
+allConfKeys = confidence_resp.keys if confidence_resp.keys else []
+if isinstance(allConfKeys, str):
+    allConfKeys = [allConfKeys]
+for k in allConfKeys[confNKeysSeen:]:
+    if k == 'f' or k == 'j':
+        if confMoved == 0:
+            confRating = 3 if k == 'f' else 4  # first press: one step from the midpoint
+            confMoved = 1
+            confFirstT = t
+        elif k == 'f':
+            confRating = max(1, confRating - 1)
+        else:
+            confRating = min(6, confRating + 1)
+    elif k == 'space' and confMoved == 1:
+        confSubmitT = t
+        continueRoutine = False
+confNKeysSeen = len(allConfKeys)
+if confMoved == 1:
+    markerX = (confRating - 3.5) * 0.12
+    markerOpacity = 1
+""",
+         js_frame="""
+let allConfKeys = (confidence_resp.keys === undefined || confidence_resp.keys === null) ? [] : confidence_resp.keys;
+if (typeof allConfKeys === 'string') {
+    allConfKeys = [allConfKeys];
+}
+for (let k of allConfKeys.slice(confNKeysSeen)) {
+    if (k === 'f' || k === 'j') {
+        if (confMoved === 0) {
+            confRating = (k === 'f') ? 3 : 4;
+            confMoved = 1;
+            confFirstT = t;
+        } else if (k === 'f') {
+            confRating = Math.max(1, confRating - 1);
+        } else {
+            confRating = Math.min(6, confRating + 1);
+        }
+    } else if (k === 'space' && confMoved === 1) {
+        confSubmitT = t;
+        continueRoutine = false;
+    }
+}
+confNKeysSeen = allConfKeys.length;
+if (confMoved === 1) {
+    markerX = (confRating - 3.5) * 0.12;
+    markerOpacity = 1;
+}
+""",
+         py_end="""
+thisExp.addData('confidenceRating', confRating if confMoved == 1 else '')
+thisExp.addData('confidenceRT', confSubmitT)
+thisExp.addData('confidenceFirstMoveT', confFirstT)
+thisExp.addData('confidenceMade', confMoved)
+""",
+         js_end="""
+psychoJS.experiment.addData('confidenceRating', (confMoved === 1) ? confRating : '');
+psychoJS.experiment.addData('confidenceRT', confSubmitT);
+psychoJS.experiment.addData('confidenceFirstMoveT', confFirstT);
+psychoJS.experiment.addData('confidenceMade', confMoved);
+""")
+
+wrap_loop(two_cond_loop('mainTrials', 20), 'main_decision', 'main_post_probe')
+wrap_loop(TrialHandler(exp, name='confidenceProbeLoop', loopType='sequential',
+                       nReps='probeThisTrial', isTrials=False), 'main_post_probe', 'main_post_probe')
 
 r = new_routine('block_break')
 add_code(r, 'block_break_code',

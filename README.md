@@ -28,17 +28,28 @@ which closes automatically. There are no post-task questions and no debrief.
 
 - Choice: F = left tilt (`tiltSign` -1), J = right tilt (+1). Grating shown for 150 ms from onset; response window
   1.5 s from onset; the trial ends at the first response made after 150 ms, or at 1.5 s.
+- Trial structure (Builder): one `*_decision` routine per trial holds a 1.0 s leading cross (0.5 s ITI + 0.5 s fixation), the
+  grating, and the cross until the routine ends; on baseline and non-probe main trials the cross stays for a further 1.5 s
+  after the response (or after the 1.5 s window if none). Probe trials go straight to the rating screen. Merging the old
+  fixation/ITI/post-period routines leaves at most one cross-to-cross routine switch per trial (browsers can drop a frame at each switch).
 - The fixation cross is not shown while the grating is on screen. It appears on the frame the grating is removed
   (Builder: conditional start on the grating's status, so there is no gap or overlap) and stays until the decision ends.
-- Post-decision period is always 1.5 s; confidence keys 1-6 never end it early. On probe trials the confidence prompt
-  is centred with no fixation cross; non-probe trials show the cross for the same 1.5 s.
+- Post-decision period: non-probe trials (and baseline) show the fixation cross for a fixed 1.5 s. Probe trials show a
+  self-paced confidence rating instead (no time limit, no fixation cross): a 1-6 scale in the centre of the screen,
+  F/J move a marker left/right, SPACE confirms. The marker starts hidden; the first F/J press places it at 3 (F) or 4 (J),
+  and SPACE only works once it is placed. Saved as `confidenceRating`, `confidenceRT` (confirm time from the start of the
+  rating screen) and `confidenceFirstMoveT`. Builder: routines `main_post_probe` / `main_post_fix`, each wrapped in a 0/1-rep loop.
+  **Design consequence:** the plan's fixed, equal post-decision period is gone, so probe trials are longer than non-probe
+  trials by the participant's rating time (a pacing/fatigue confound). Use `confidenceRT` when modelling and state it in the preregistration.
 - Sparse schedule: exactly 10 probes in each block of 40. Missed choices get no probe
   (`probeOriginallyScheduled` keeps the randomised value).
-- Practice feedback: "Correct" green, "Incorrect" red, "Too slow" (no response in the window) yellow.
+- Practice feedback: "Correct" green, "Incorrect" red; no message when no response was made in the window.
 
 ## Differences from the plan, and why
 - The condition variable in code is `probeCondition`, not `condition` (PsychoPy's staircase loop overwrites `condition`);
   the chosen condition is still saved as the `condition` column from the start dialog.
+- Confidence is a self-paced F/J-and-SPACE rating on a 1-6 scale (requested), not 1-6 keys inside a fixed 1.5 s window; see the
+  design consequence under Session.
 - Calibration uses `calibTiltSign`/`calibCorrAns` (assigning `tiltSign`/`corrAns` in code shadows the loop variables).
 - `Save csv file` is off (the per-loop save crashed in PsychoPy 2026.2.4); the wide CSV is saved.
 - The QUEST loop carries an extra `conditionsFile` entry so this PsychoPy build can compile it; Builder may warn about it.
@@ -67,8 +78,13 @@ Verified (PsychoPy 2026.2.4, Builder version):
 - The `.psyexp` compiles to Python and JavaScript; the Coder script and `helpers.py` compile, and the helpers self-test passes.
 - Simulated full sessions of `no_probe`, `sparse_probe` and `full_probe` (fake keypresses) each passed all checks in
   `verify_output.py`: row counts, 4 blocks x 40, 20 per orientation per block, probe counts 0/40/160 with 10 per block,
-  confidence empty on non-probe rows, no probe after a missed choice, scoring consistent.
-- A per-frame capture of practice trials showed clean grating-to-cross handoffs (no overlap, no empty frames).
+  rating present only on delivered probes (1-6, with a recorded RT), no probe after a missed choice, scoring consistent.
+  After the self-paced rating change, one simulated session per condition passed (fake keys: J, F, J, SPACE, so the marker logic
+  ran and ended on 4); the Coder script was only compiled.
+- Per-frame traces (`simulate_session.py <cond> --trace`) of full sessions of `full_probe`, `sparse_probe` and `no_probe` on the merged-routine
+  build showed no cross-plus-grating overlap and no empty frame during trials. The only empty frames were the window start-up and the
+  final flip at the end, plus a single 1-frame blank near 36 s in `no_probe` (around the end of practice; not seen in the other two runs,
+  which ran under the same load). Local PsychoPy only: the browser behaviour is not covered.
 - Counterbalancing (`condition = auto`, local shelf): four simulated full sessions each passed `verify_output.py`, and the saved
   `assignedCondition` matched the allocated group and the probe counts (group 0 -> `no_probe`, 1 -> `sparse_probe`,
   2 -> `full_probe`; `conditionSource` = `counterbalance`). Three concurrent runs were allocated `full_probe`, `sparse_probe`,
@@ -77,7 +93,7 @@ Verified (PsychoPy 2026.2.4, Builder version):
   (`simulate_session.py` does this by process ID); a simultaneous start crashed one run when both created `data/`.
 
 NOT verified:
-- Real participant timing on your display (the 1.5 s post period, 150 ms exposure) and any photodiode/frame-drop check.
+- Real participant timing on your display (the 1.5 s non-probe fixation period, 150 ms exposure) and any photodiode/frame-drop check.
 - Real clicking and calibration: the simulation's responses are fake (about 80% correct whatever the tilt), so its
   calibrated tilts (3.4 to 11.7 degrees) mean nothing; check `calibratedTiltDeg` and `calibrationAtBoundary` in pilot data.
 - Online counterbalancing (Pavlovia Shelf setup), and a long-run check of group balance across many sessions.

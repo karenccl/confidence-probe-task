@@ -2,8 +2,8 @@
 """Confidence-probe reactivity study (local PsychoPy / Coder version).
 
 Between-participant conditions: no_probe, sparse_probe (40/160), full_probe (160/160).
-Every main/baseline trial has a fixed 1.5 s post-decision period; a confidence
-response never ends it early.
+Baseline and non-probe main trials have a fixed 1.5 s post-decision period. Probe trials use a
+self-paced confidence rating (F/J move a marker along 1-6, SPACE confirms; no time limit).
 
 Run:  python confidence_probe.py            (full session)
       python confidence_probe.py --quick    (short block sizes for technical testing)
@@ -84,10 +84,18 @@ gabor = visual.GratingStim(win, pos=(0, 0), ori=0, **GABOR)
 message = visual.TextStim(win, text='', height=0.035, wrapWidth=1.4, color='white')
 feedbackStim = visual.TextStim(win, text='', height=0.06, color='white')
 confidencePrompt = visual.TextStim(
-    win, pos=(0, 0), height=0.04, wrapWidth=1.5, color='white',
-    text=('How confident are you that your choice was correct?\n\n'
-          '1       2       3       4       5       6\n'
-          'Guessing                                  Certain'))
+    win, pos=(0, 0.22), height=0.04, wrapWidth=1.5, color='white',
+    text='How confident are you that your choice was correct?')
+confDigits = [visual.TextStim(win, text=str(i), pos=((i - 3.5) * 0.12, 0.02), height=0.06,
+                              color='white') for i in range(1, 7)]
+confLabels = [visual.TextStim(win, text='Guessing', pos=(-2.5 * 0.12, -0.07), height=0.03,
+                              color='white'),
+              visual.TextStim(win, text='Certain', pos=(2.5 * 0.12, -0.07), height=0.03,
+                              color='white')]
+confHint = visual.TextStim(win, text='F = move left     J = move right     SPACE = confirm',
+                           pos=(0, -0.22), height=0.028, color='white')
+confMarker = visual.ShapeStim(win, vertices=[(-0.02, 0.02), (0.02, 0.02), (0, -0.02)],
+                              fillColor='white', lineColor='white')
 
 
 class Quit(Exception):
@@ -161,31 +169,44 @@ def decision(tiltSign, corrAns, tiltDeg):
 
 
 def post_period(probe):
-    """Fixed 1.5 s. If probe: confidence prompt + keys 1-6, response does NOT end it."""
+    """Non-probe: fixation for POST_DUR. Probe: self-paced confidence rating (no time limit);
+    F/J move a marker along 1-6, SPACE confirms once the marker has been placed.
+    Returns (rating, first_move_t, submit_t); all None for non-probe trials."""
+    if not probe:
+        timed_fixation(POST_DUR)
+        return None, None, None
     kb.clearEvents()
-    kb.clock.reset()
     win.callOnFlip(trialClock.reset)
-    win.callOnFlip(kb.clock.reset)
-    key = rt = None
+    rating, firstT, submitT = None, None, None
     frameN = 0
-    half = 0.5 * win.monitorFramePeriod
-    while True:
+    while submitT is None:
         t = 0 if frameN == 0 else trialClock.getTime()
-        if t >= POST_DUR - half:
-            break
-        if probe:
-            confidencePrompt.draw()  # centred, no fixation cross while rating
-        else:
-            fixation.draw()
+        confidencePrompt.draw()
+        for d in confDigits:
+            d.draw()
+        for lab in confLabels:
+            lab.draw()
+        confHint.draw()
+        if rating is not None:
+            confMarker.pos = ((rating - 3.5) * 0.12, 0.09)
+            confMarker.draw()
         win.flip()
-        keys = kb.getKeys(['1', '2', '3', '4', '5', '6', 'escape'], waitRelease=False)
-        for k in keys:
+        for k in kb.getKeys(['f', 'j', 'space', 'escape'], waitRelease=False):
+            kt = trialClock.getTime()
             if k.name == 'escape':
                 raise Quit()
-            if probe and key is None:
-                key, rt = k.name, k.rt
+            if k.name in ('f', 'j'):
+                if rating is None:
+                    rating = 3 if k.name == 'f' else 4  # one step from the midpoint
+                    firstT = kt
+                elif k.name == 'f':
+                    rating = max(1, rating - 1)
+                else:
+                    rating = min(6, rating + 1)
+            elif k.name == 'space' and rating is not None:
+                submitT = kt
         frameN += 1
-    return key, rt
+    return rating, firstT, submitT
 
 
 def iti():
@@ -209,7 +230,7 @@ def run_loop(handler_name, phase, nReps, tiltDeg, feedback=False, post=False):
         key, rt, corr = decision(trial['tiltSign'], trial['corrAns'], tiltDeg)
         if feedback:
             if key is None:
-                feedbackStim.text, feedbackStim.color = 'Too slow', '#ffdc00'
+                feedbackStim.text, feedbackStim.color = '', 'white'  # no response: no message
             elif corr:
                 feedbackStim.text, feedbackStim.color = 'Correct', '#2ecc40'
             else:
@@ -289,8 +310,8 @@ def run_main(tiltDeg):
             key, rt, corr = decision(trial['tiltSign'], trial['corrAns'], tiltDeg)
             choiceMade = int(key is not None)
             probeThisTrial = scheduled if choiceMade else 0  # no rating of a missed choice
-            confKey, confRt = post_period(probeThisTrial == 1)
-            confidenceMade = int(probeThisTrial == 1 and confKey is not None)
+            confRating, confFirstT, confSubmitT = post_period(probeThisTrial == 1)
+            confidenceMade = int(confRating is not None)
             iti()
             thisExp.addData('phase', 'main')
             thisExp.addData('condition', condition)
@@ -305,9 +326,9 @@ def run_main(tiltDeg):
             thisExp.addData('probeOriginallyScheduled', scheduled)
             thisExp.addData('probeScheduled', probeThisTrial)
             thisExp.addData('confidenceRequested', probeThisTrial)
-            thisExp.addData('confidence_resp.keys',
-                            confKey if confidenceMade else '')
-            thisExp.addData('confidence_resp.rt', confRt if confidenceMade else '')
+            thisExp.addData('confidenceRating', confRating if confidenceMade else '')
+            thisExp.addData('confidenceRT', confSubmitT if confidenceMade else '')
+            thisExp.addData('confidenceFirstMoveT', confFirstT if confidenceMade else '')
             thisExp.addData('confidenceMade', confidenceMade)
             thisExp.nextEntry()
             globalTrialN += 1
@@ -327,8 +348,9 @@ INSTRUCTIONS = (
     'Press SPACE to continue.')
 CONFIDENCE_INSTRUCTIONS = (
     'On some trials, you will also be asked how confident you are that your choice '
-    'was correct.\n\n'
-    'Use keys 1-6:\n1 means you were guessing.\n6 means you were very certain.\n\n'
+    'was correct.\n\nA scale from 1 to 6 will appear:\n1 means you were guessing, '
+    '6 means you were very certain.\n\nPress F to move the marker left and J to move it '
+    'right, then press SPACE to confirm. There is no time limit for the rating.\n\n'
     'Use the entire scale when appropriate. Confidence is about the choice you just '
     'made, not your general ability.\n\nPress SPACE to continue.')
 NEUTRAL_INSTRUCTIONS = (

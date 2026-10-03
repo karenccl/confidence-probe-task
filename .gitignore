@@ -42,3 +42,8 @@ Thumbs.db
 /lib/
 /html/lib/
 
+
+# Local test output and counterbalancing state (participant/pilot data, not part of the code)
+/data/
+shelf.json
+sim_lastrun_*.py
