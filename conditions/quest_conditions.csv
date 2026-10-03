@@ -1,0 +1,2 @@
+label,startVal,startValSd,pThreshold,method,beta,delta,gamma,grain,minVal,maxVal,range
+orientationQuest,8,4,0.75,quantile,3.5,0.02,0.5,0.1,0.5,15.5,15
